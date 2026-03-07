@@ -1,0 +1,23 @@
+﻿services:
+  mac_airbnb_api:
+    build: .
+    container_name: mac_airbnb_api
+    restart: unless-stopped
+    ports:
+      - "7777:7777"
+    environment:
+      - TZ=Europe/London
+    volumes:
+      - ./logs:/app/logs
+      - ./serviceaccount.json:/app/serviceaccount.json:ro
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7777/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+networks:
+  internal_net:
+    driver: bridge

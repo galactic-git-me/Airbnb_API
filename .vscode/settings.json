@@ -1,0 +1,6 @@
+{
+    "gitdoc.enabled": true,
+    "microsoft-sovereign-cloud.environment": "custom",
+    "emeraldwalk.runonsave.enabled": true,
+    "emeraldwalk.runonsave.statusMessageTimeout": 3000
+}
