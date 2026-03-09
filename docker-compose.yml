@@ -8,7 +8,7 @@
     environment:
       - TZ=Europe/London
     volumes:
-      - ./logs:/app/logs
+      - .:/app
       - ./serviceaccount.json:/app/serviceaccount.json:ro
     networks:
       - internal_net
