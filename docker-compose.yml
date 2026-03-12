@@ -1,10 +1,10 @@
-﻿services:
+services:
   mac_airbnb_api:
     build: .
     container_name: mac_airbnb_api
     restart: unless-stopped
-    ports:
-      - "7777:7777"
+    # ports:
+    #   - "7777:7777" # Disabled to avoid conflict with systemd service
     environment:
       - TZ=Europe/London
     volumes:
@@ -12,6 +12,10 @@
       - ./serviceaccount.json:/app/serviceaccount.json:ro
     networks:
       - internal_net
+      - caddy_network
+    labels:
+      caddy: studio-at-113b.ddnsgeek.com
+      caddy.reverse_proxy: "{{upstreams 7777}}"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:7777/health"]
       interval: 30s
@@ -21,3 +25,5 @@
 networks:
   internal_net:
     driver: bridge
+  caddy_network:
+    external: true

@@ -34,7 +34,8 @@ logger = logging.getLogger("Airbnb API")
 HOSPITABLE_IP_RANGE = ipaddress.ip_network("38.80.170.0/24")
 
 def is_hospitable_ip(ip_str: str) -> bool:
-    if ip_str in ["127.0.0.1", "::1", "localhost"]:
+    allowed_test_ips = ["127.0.0.1", "::1", "localhost", "185.249.73.114"]
+    if ip_str in allowed_test_ips:
         return True
     try:
         ip = ipaddress.ip_address(ip_str)
@@ -426,9 +427,19 @@ Y88888o.       8 8 8888         `8.`888b             ,8'             8 8888     
         logging.info(ASCII_text)
     
     # Format dates and cost values
-    arrive_date = format_date(data.get("INQUIRY:ARRIVE"))
-    depart_date = format_date(data.get("INQUIRY:DEPART"))
-    book_date = format_date(data.get("INQUIRY:BOOK_DATE"))
+    arrive_obj = parse_date(data.get("INQUIRY:ARRIVE"))
+    depart_obj = parse_date(data.get("INQUIRY:DEPART"))
+    book_obj = parse_date(data.get("INQUIRY:BOOK_DATE"))
+    
+    arrive_date = arrive_obj.strftime("%d/%m/%Y") if arrive_obj else data.get("INQUIRY:ARRIVE")
+    depart_date = depart_obj.strftime("%d/%m/%Y") if depart_obj else data.get("INQUIRY:DEPART")
+    book_date = book_obj.strftime("%d/%m/%Y") if book_obj else data.get("INQUIRY:BOOK_DATE")
+    
+    # Calculate nights if both dates are valid
+    nights = data.get("INQUIRY:NIGHTS")
+    if arrive_obj and depart_obj:
+        nights = (depart_obj.date() - arrive_obj.date()).days
+    
     cost = format_cost(extract_inquiry_cost(data))
         
     # Prepare the row data with the JSON payload as a whole and split fields
@@ -449,7 +460,7 @@ Y88888o.       8 8 8888         `8.`888b             ,8'             8 8888     
         data.get("INQUIRY:CHECK_IN"),
         depart_date,  # Formatted depart date
         data.get("INQUIRY:CHECK_OUT"),
-        data.get("INQUIRY:NIGHTS"),
+        str(nights),  # Calculated nights (O-M)
         data.get("INQUIRY:ADULTS"),
         data.get("INQUIRY:CHILDREN"),
         data.get("INQUIRY:CHANNEL"),
@@ -457,7 +468,7 @@ Y88888o.       8 8 8888         `8.`888b             ,8'             8 8888     
         cost,  # Formatted cost
         data.get("GUEST:COUNTRY"),
         current_datetime,  # Timestamp
-        endpoint  # Endpoint (again, if needed)
+        endpoint  # Endpoint
     ]
 
     await update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data)
@@ -681,66 +692,96 @@ async def update_crm_api(data, column):
         raise e  # Re-raise the exception to let FastAPI handle it
 
 
+def parse_date(date_str):
+    """Parse date strings into datetime objects with multi-format support"""
+    if not date_str:
+        return None
+    
+    if not isinstance(date_str, str):
+        # Handle numeric serial dates
+        try:
+            val = float(date_str)
+            return datetime(1899, 12, 30) + timedelta(days=val)
+        except (ValueError, TypeError):
+            return None
+
+    date_str = date_str.strip()
+    if not date_str:
+        return None
+
+    # Handle numeric strings
+    if date_str.isdigit() or (date_str.replace('.', '', 1).isdigit() and '.' in date_str):
+        try:
+            val = float(date_str)
+            if 30000 < val < 60000:
+                return datetime(1899, 12, 30) + timedelta(days=val)
+        except ValueError:
+            pass
+
+    # Handle ISO format
+    if "T" in date_str:
+        try:
+            clean_iso = date_str.strip("-")
+            if clean_iso.endswith("Z"):
+                try:
+                    return datetime.strptime(clean_iso, "%Y-%m-%dT%H:%M:%S.%fZ")
+                except ValueError:
+                    return datetime.strptime(clean_iso.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            pass
+
+    # Generic multi-format try
+    clean_date = date_str.replace(",", "").strip()
+    
+    # Strip time
+    if len(clean_date.split()) > 3:
+        parts = clean_date.split()
+        if ":" in parts[-1]:
+            clean_date = " ".join(parts[:-1])
+    elif " " in clean_date and ":" in clean_date:
+        clean_date = clean_date.split()[0]
+    
+    # Remove day names
+    days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+                    "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for day in days_of_week:
+        if clean_date.startswith(day):
+            clean_date = clean_date[len(day):].strip()
+            break
+
+    formats_to_try = [
+        "%d %b %Y",      # 17 Apr 2025
+        "%d %B %Y",      # 17 April 2025
+        "%b %d %Y",      # Dec 26 2026
+        "%B %d %Y",      # December 26 2026
+        "%d %b %y",      # 17 Apr 25
+        "%b %d %y",      # Dec 26 25
+        "%d %B %y",      # 17 April 25
+        "%B %d %y",      # December 26 25
+        "%Y-%m-%d",      # 2024-08-28
+        "%d/%m/%Y",      # 28/08/2024
+        "%m/%d/%Y",      # 08/28/2024
+        "%d/%m/%y",      # 28/08/24
+        "%m/%d/%y",      # 08/28/24
+        "%Y.%m.%d",      # 2024.08.28
+    ]
+    
+    for fmt in formats_to_try:
+        try:
+            return datetime.strptime(clean_date, fmt)
+        except ValueError:
+            continue
+            
+    return None
+
 def format_date(date_str):
-    """Format date strings to 'Sat Feb 22, 2025' format"""
+    """Format date strings to 'DD/MM/YYYY' format for CRM compatibility"""
     if not date_str:
         return date_str
     
-    try:
-        # Handle different date formats
-        if "," in date_str:
-            # Format like "Sunday, Dec. 29 2024"
-            parts = date_str.split(',')
-            if len(parts) == 2:
-                day_of_week = parts[0].strip()
-                rest = parts[1].strip()
-                
-                # Handle formats with periods in month abbreviation
-                rest = rest.replace(".", "")
-                
-                # Parse the date
-                try:
-                    date_obj = datetime.strptime(rest, "%b %d %Y")
-                    return f"{day_of_week[:3]} {date_obj.strftime('%b %d, %Y')}"
-                except ValueError:
-                    # Try another format
-                    try:
-                        # For formats like "17 Apr, 2025"
-                        full_date = date_str.replace(",", "").strip()
-                        date_obj = datetime.strptime(full_date, "%d %b %Y")
-                        return date_obj.strftime("%a %b %d, %Y")
-                    except ValueError:
-                        pass
-        
-        elif date_str.count(" at ") > 0:
-            # Format like "Mon Dec 30 2024 at 09:39:29"
-            date_part = date_str.split(" at ")[0]
-            date_obj = datetime.strptime(date_part, "%a %b %d %Y")
-            return date_obj.strftime("%a %b %d, %Y")
-        
-        # Handle formats like "17 Apr, 2025" or "17 Apr 2025" or "17 Apr 2025"
-        if date_str.count(" ") >= 2:
-            # Remove any commas
-            clean_date = date_str.replace(",", "").strip()
-            
-            # Try different date formats
-            formats_to_try = [
-                "%d %b %Y",      # 17 Apr 2025
-                "%d %B %Y",      # 17 April 2025
-                "%d %b, %Y",     # 17 Apr, 2025
-                "%d %B, %Y"      # 17 April, 2025
-            ]
-            
-            for fmt in formats_to_try:
-                try:
-                    date_obj = datetime.strptime(clean_date, fmt)
-                    return date_obj.strftime("%a %b %d, %Y")
-                except ValueError:
-                    continue
-        
-    except Exception as e:
-        logger.error(f"Error formatting date '{date_str}': {e}")
-        return date_str
+    date_obj = parse_date(date_str)
+    if date_obj:
+        return date_obj.strftime("%d/%m/%Y")
     
     return date_str
 
