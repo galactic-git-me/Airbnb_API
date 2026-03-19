@@ -10,9 +10,10 @@ import threading
 import time
 import pytz
 import ipaddress
+from typing import Any, Dict, List, Optional, Union, Tuple, cast
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from rich.console import Console
@@ -67,13 +68,14 @@ else:
 # Global sheet ID cache
 sheet_id_cache = {}
 
-async def get_sheet_id(sheet, spreadsheet_id, sheet_name):
+async def get_sheet_id(sheet: Any, spreadsheet_id: str, sheet_name: str) -> Optional[int]:
     """Get the gid (sheetId) for a given sheet name, with caching"""
     if sheet_name in sheet_id_cache:
         return sheet_id_cache[sheet_name]
     
     try:
-        metadata = await execute_with_backoff(sheet.get(spreadsheetId=spreadsheet_id))
+        req = sheet.get(spreadsheetId=spreadsheet_id)
+        metadata = await execute_with_backoff(req)
         for s in metadata.get('sheets', []):
             props = s.get('properties', {})
             if props.get('title') == sheet_name:
@@ -85,14 +87,14 @@ async def get_sheet_id(sheet, spreadsheet_id, sheet_name):
     
     return None
 
-async def sync_crm_dimensions(sheet, spreadsheet_id):
+async def sync_crm_dimensions(sheet: Any, spreadsheet_id: str):
     """
     Ensures CRM - API has at least as many rows as API_RAWRAW by copying 
     down the last containing data row.
     """
     # Fetch data to determine row counts
-    raw_values = await get_sheet_data_with_cache(sheet, spreadsheet_id, SHEET_NAME)
-    crm_values = await get_sheet_data_with_cache(sheet, spreadsheet_id, SHEET_NAME_CRM)
+    raw_values: List[List[Any]] = await get_sheet_data_with_cache(sheet, spreadsheet_id, SHEET_NAME)
+    crm_values: List[List[Any]] = await get_sheet_data_with_cache(sheet, spreadsheet_id, SHEET_NAME_CRM)
     
     # We want to find the last row in CRM that actually has an ID in column A
     last_crm_data_row = 0
@@ -119,8 +121,8 @@ async def sync_crm_dimensions(sheet, spreadsheet_id):
                     'copyPaste': {
                         'source': {
                             'sheetId': crm_sheet_id,
-                            'startRowIndex': last_crm_data_row - 1,
-                            'endRowIndex': last_crm_data_row,
+                            'startRowIndex': int(last_crm_data_row) - 1,
+                            'endRowIndex': int(last_crm_data_row),
                             'startColumnIndex': 0,
                             'endColumnIndex': 50 # Cover typical CRM columns
                         },
@@ -143,9 +145,11 @@ async def sync_crm_dimensions(sheet, spreadsheet_id):
         logger.info(f"Successfully extended {SHEET_NAME_CRM} to row {raw_total_rows}")
         
         # Clear CRM cache so next read gets fresh data
-        with sheet_cache['lock']:
-            if SHEET_NAME_CRM in sheet_cache['sheets']:
-                sheet_cache['sheets'][SHEET_NAME_CRM]['data'] = None
+        lock = sheet_cache['lock']
+        if isinstance(lock, threading.Lock):
+            with lock:
+                if SHEET_NAME_CRM in sheet_cache['sheets']:
+                    sheet_cache['sheets'][SHEET_NAME_CRM]['data'] = None
     else:
         logger.info(f"CRM rows already synced or no data found (CRM: {last_crm_data_row}, RAW: {raw_total_rows})")
 
@@ -156,7 +160,7 @@ sheet = service.spreadsheets()
 # pylint: enable=no-member
 
 # Global cache for spreadsheet data
-sheet_cache = {
+sheet_cache: Dict[str, Any] = {
     'sheets': {},
     'lock': threading.Lock()
 }
@@ -184,18 +188,16 @@ async def log_requests(request: Request, call_next):
             console.print(f"Raw Payload: {data}")
             logger.info(f"Payload: {data}")
 
-            def convert_to_quoted_values(data):
+            def convert_to_quoted_values(val: Any) -> str:
                 """
                 Function to add double quotes around values in a string.
                 Leaves empty values unchanged.
-                
-                :param data: String with unquoted values.
-                :return: String with values wrapped in double quotes.
                 """
-                if data is not None and data.strip() != "":
-                    return f'"{data}"'  # Add quotes around non-empty value
-                else:
-                    return '""'  # Keep empty value as an empty string with double quotes
+                if val is not None:
+                    s_val = str(val).strip()
+                    if s_val != "":
+                        return f'"{s_val}"'
+                return '""'
             
             # converted_data = convert_to_quoted_values(data)
 
@@ -223,12 +225,16 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+@app.get("/")
+async def root():
+    return {"message": "Airbnb API is running", "version": "1.1.0"}
+
 @app.get("/health")
-async def health(request: Request):
-    return "ok", 200
+async def health():
+    return PlainTextResponse("ok")
 
 @app.get("/api/test")
-async def test(request: Request):
+async def test():
     return {"status": "success"}
 
 @app.post("/api/new_booking")
@@ -474,14 +480,14 @@ Y88888o.       8 8 8888         `8.`888b             ,8'             8 8888     
     await update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data)
 
 
-async def update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data, max_retries=10):
+async def update_google_sheets(sheet: Any, SPREADSHEET_ID: str, SHEET_NAME: str, data: Dict[str, Any], row_data: List[Any], max_retries: int = 10):
     """Update Google Sheets with retry logic for rate limiting and caching"""
     retry_count = 0
     base_delay = 2  # Start with a 2-second delay
     
     # Extract secondary identifier fields for deduplication
     new_id = data.get('ID')
-    new_name = str(data.get("GUEST:NAME", "") or "").strip().lower()
+    new_name = str(data.get("GUEST:NAME") or "").strip().lower()
     new_arrive = str(row_data[12] or "").strip() # Formatted arrive date (Column M)
     new_cost = str(row_data[21] or "").strip()   # Formatted cost (Column V)
     
@@ -515,10 +521,12 @@ async def update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data
                     
             if row_index >= 0:
                 # If found, update the existing row with exponential backoff
+                row_num = int(row_index) + 1
+                row_num_u = int(row_index) + 1
                 await execute_with_backoff(
                     sheet.values().update(
                         spreadsheetId=SPREADSHEET_ID,
-                        range=f'{SHEET_NAME}!A{row_index + 1}:Y{row_index + 1}',
+                        range=f'{SHEET_NAME}!A{row_num_u}:Y{row_num_u}',
                         valueInputOption='RAW',
                         body={
                             'values': [row_data]
@@ -528,7 +536,7 @@ async def update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data
                     base_delay=base_delay,
                     retry_count=retry_count
                 )
-                logger.info(f"Row {row_index + 1} updated successfully.")
+                logger.info(f"Row {int(row_index) + 1} updated successfully.")
                 return
             
             # If no match is found, append a new row with exponential backoff
@@ -548,10 +556,14 @@ async def update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data
             )
             
             # Update cache with new row
-            with sheet_cache['lock']:
-                if SHEET_NAME in sheet_cache['sheets'] and sheet_cache['sheets'][SHEET_NAME]['data'] is not None:
-                    # Append up to column V so future secondary checks during this run can verify against it
-                    sheet_cache['sheets'][SHEET_NAME]['data'].append(row_data[:22])
+            lock = sheet_cache['lock']
+            if isinstance(lock, threading.Lock):
+                with lock:
+                    if SHEET_NAME in sheet_cache['sheets'] and sheet_cache['sheets'][SHEET_NAME]['data'] is not None:
+                        # Append up to column V so future secondary checks during this run can verify against it
+                        # Use a list comprehension to avoid slice syntax that might confuse some type checkers
+                        new_row_cache = [row_data[i] for i in range(min(len(row_data), 22))]
+                        sheet_cache['sheets'][SHEET_NAME]['data'].append(new_row_cache)
             
             logger.info("New row added successfully.")
             
@@ -582,7 +594,7 @@ async def update_google_sheets(sheet, SPREADSHEET_ID, SHEET_NAME, data, row_data
                 raise e
 
 
-async def execute_with_backoff(request, max_retries=10, base_delay=2, retry_count=0):
+async def execute_with_backoff(request: Any, max_retries: int = 10, base_delay: int = 2, retry_count: int = 0) -> Any:
     """Execute a Google Sheets API request with exponential backoff"""
     current_retry = retry_count
     
@@ -603,57 +615,62 @@ async def execute_with_backoff(request, max_retries=10, base_delay=2, retry_coun
                 raise e
 
 
-async def get_sheet_data_with_cache(sheet, SPREADSHEET_ID, SHEET_NAME):
+async def get_sheet_data_with_cache(sheet: Any, SPREADSHEET_ID: str, SHEET_NAME: str) -> List[List[Any]]:
     """Get sheet data with caching to reduce API calls"""
-    with sheet_cache['lock']:
-        current_time = datetime.now()
-        
-        # Initialize sub-cache for this sheet if not exists
-        if SHEET_NAME not in sheet_cache['sheets']:
-             sheet_cache['sheets'][SHEET_NAME] = {'data': None, 'last_updated': None}
-        
-        cache_entry = sheet_cache['sheets'][SHEET_NAME]
+    lock = sheet_cache['lock']
+    if isinstance(lock, threading.Lock):
+        with lock:
+            current_time = datetime.now()
+            
+            # Initialize sub-cache for this sheet if not exists
+            if SHEET_NAME not in sheet_cache['sheets']:
+                 sheet_cache['sheets'][SHEET_NAME] = {'data': None, 'last_updated': None}
+            
+            cache_entry = sheet_cache['sheets'][SHEET_NAME]
 
-        # If cache is valid, return cached data
-        if (cache_entry['data'] is not None and 
-            cache_entry['last_updated'] is not None and 
-            current_time - cache_entry['last_updated'] < timedelta(seconds=CACHE_EXPIRATION)):
-            logger.info(f"Using cached sheet data for {SHEET_NAME}")
-            return cache_entry['data']
+            # If cache is valid, return cached data
+            if (cache_entry['data'] is not None and 
+                cache_entry['last_updated'] is not None and 
+                current_time - cache_entry['last_updated'] < timedelta(seconds=CACHE_EXPIRATION)):
+                logger.info(f"Using cached sheet data for {SHEET_NAME}")
+                return cache_entry['data']
     
     # Cache is invalid or expired, fetch new data with backoff
     try:
         logger.info(f"Fetching fresh sheet data for {SHEET_NAME}")
-        result = await execute_with_backoff(
-            sheet.values().get(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f'{SHEET_NAME}!A:V'  # We need up to column V for deduplication checks
-            )
+        req = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f'{SHEET_NAME}!A:V'  # We need up to column V for deduplication checks
         )
+        result = await execute_with_backoff(req)
         
         values = result.get('values', [])
         
         # Update cache
-        with sheet_cache['lock']:
-            sheet_cache['sheets'][SHEET_NAME]['data'] = values
-            sheet_cache['sheets'][SHEET_NAME]['last_updated'] = current_time
-            
+        lock = sheet_cache['lock']
+        if isinstance(lock, threading.Lock):
+            with lock:
+                sheet_cache['sheets'][SHEET_NAME]['data'] = values
+                sheet_cache['sheets'][SHEET_NAME]['last_updated'] = current_time
+                
         return values
         
     except Exception as e:
         logger.error(f"Failed to fetch sheet data for {SHEET_NAME}: {e}")
         
         # If cache exists but is expired, use it anyway as fallback
-        with sheet_cache['lock']:
-             if SHEET_NAME in sheet_cache['sheets'] and sheet_cache['sheets'][SHEET_NAME]['data'] is not None:
-                logger.warning(f"Using expired cache as fallback for {SHEET_NAME}")
-                return sheet_cache['sheets'][SHEET_NAME]['data']
+        lock = sheet_cache['lock']
+        if isinstance(lock, threading.Lock):
+            with lock:
+                 if SHEET_NAME in sheet_cache['sheets'] and sheet_cache['sheets'][SHEET_NAME]['data'] is not None:
+                    logger.warning(f"Using expired cache as fallback for {SHEET_NAME}")
+                    return sheet_cache['sheets'][SHEET_NAME]['data']
         
         # No cache available, re-raise the exception
         raise e
 
 
-async def update_crm_api(data, column):
+async def update_crm_api(data: Dict[str, Any], column: str):
     # Get the current date in the required format
     current_date = datetime.now().strftime('%Y-%m-%d')
 
@@ -692,7 +709,7 @@ async def update_crm_api(data, column):
         raise e  # Re-raise the exception to let FastAPI handle it
 
 
-def parse_date(date_str):
+def parse_date(date_str: Any) -> Optional[datetime]:
     """Parse date strings into datetime objects with multi-format support"""
     if not date_str:
         return None
@@ -737,7 +754,8 @@ def parse_date(date_str):
     if len(clean_date.split()) > 3:
         parts = clean_date.split()
         if ":" in parts[-1]:
-            clean_date = " ".join(parts[:-1])
+            # Use a list comprehension or explicit loop if slice is problematic
+            clean_date = " ".join([parts[i] for i in range(len(parts) - 1)])
     elif " " in clean_date and ":" in clean_date:
         clean_date = clean_date.split()[0]
     
@@ -745,8 +763,8 @@ def parse_date(date_str):
     days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
                     "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     for day in days_of_week:
-        if clean_date.startswith(day):
-            clean_date = clean_date[len(day):].strip()
+        if isinstance(clean_date, str) and clean_date.startswith(day):
+            clean_date = clean_date.removeprefix(day).strip()
             break
 
     formats_to_try = [
@@ -766,11 +784,12 @@ def parse_date(date_str):
         "%Y.%m.%d",      # 2024.08.28
     ]
     
-    for fmt in formats_to_try:
-        try:
-            return datetime.strptime(clean_date, fmt)
-        except ValueError:
-            continue
+    if isinstance(clean_date, str):
+        for fmt in formats_to_try:
+            try:
+                return datetime.strptime(clean_date, fmt)
+            except ValueError:
+                continue
             
     return None
 

@@ -2,5 +2,7 @@
     "gitdoc.enabled": true,
     "microsoft-sovereign-cloud.environment": "custom",
     "emeraldwalk.runonsave.enabled": true,
-    "emeraldwalk.runonsave.statusMessageTimeout": 3000
+    "emeraldwalk.runonsave.statusMessageTimeout": 3000,
+    "python.defaultInterpreterPath": "/home/mac/CODING/Airbnb_API/venv/bin/python3",
+    "python.analysis.extraPaths": ["/home/mac/CODING/Airbnb_API/venv/lib/python3.14/site-packages"]
 }
